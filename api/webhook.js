@@ -310,8 +310,15 @@ bot.command('clearall', async (ctx) => {
   await ctx.reply(`🗑️ All sales and debt records cleared.`);
 });
 
+// ─── GLOBAL ERROR HANDLER ────────────────────────────────────
+bot.catch(async (err, ctx) => {
+  console.error('Bot error:', err);
+  try { await ctx.reply(`⚠️ Error: ${err.message}`); } catch (_) {}
+});
+
 // ─── NATURAL LANGUAGE ────────────────────────────────────────
 bot.on('text', async (ctx) => {
+  try {
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
 
@@ -409,6 +416,10 @@ bot.on('text', async (ctx) => {
 
   if (actions[parsed.intent]) return actions[parsed.intent]();
   return ctx.reply("❓ I didn't understand that.\n\nType /help to see what I can do.");
+  } catch (err) {
+    console.error('Text handler error:', err);
+    await ctx.reply(`⚠️ Error: ${err.message}`);
+  }
 });
 
 // ─── VERCEL HANDLER ──────────────────────────────────────────
