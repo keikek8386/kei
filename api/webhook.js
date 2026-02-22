@@ -111,6 +111,9 @@ async function parseWithGroq(userMessage) {
     `- "sale": paid in full. "debt": paid partially or nothing. "settle": paying off a debt.\n` +
     `- "paid" = amount handed over now. If the user mentions payment, always set "paid".\n` +
     `- "latte" and "matcha latte" are different items. If user says only "latte", choose "latte".\n` +
+    `- If a customer is mentioned with no amount and no paid keyword, set intent="debt" and paid=0.\n` +
+    `- If a customer is mentioned and "paid" appears with no number, treat as fully paid.\n` +
+    `- If paid amount is less than total price, intent must be "debt".\n` +
     `- Match item names exactly from the menu. Default qty = 1. customer = null if not mentioned.`;
 
   try {
@@ -138,6 +141,7 @@ const parseNumberOrNull = v => {
   const n = parseFloat(v);
   return Number.isFinite(n) ? n : null;
 };
+const hasPaidKeyword = text => /\b(?:paid?|pay|pays|payment)\b/i.test(text);
 
 function extractPaidAmount(text) {
   if (/\b(?:paid?|pay|pays|payment)\s+(?:nothing|none|zero)\b/i.test(text) || /\bno payment\b/i.test(text)) {
@@ -386,14 +390,33 @@ bot.on('text', async (ctx) => {
 
   const paidFromModel = parseNumberOrNull(parsed.paid);
   const paidFromText = extractPaidAmount(text);
-  const explicitPaid = paidFromModel !== null ? paidFromModel : paidFromText;
+  const numericPaidInText = paidFromText !== null;
+  const explicitPaid = numericPaidInText ? paidFromText : paidFromModel;
   if (explicitPaid !== null) parsed.paid = explicitPaid;
 
   const hintedCustomer = inferCustomerFromText(text);
   if (!parsed.customer && hintedCustomer) parsed.customer = hintedCustomer;
 
+  const customerMentioned = Boolean((parsed.customer || "").trim());
+  const paidKeywordMentioned = hasPaidKeyword(text);
   const inferredTotal = inferTotalFromItems(parsed.items);
-  if (parsed.intent === 'sale' && explicitPaid !== null && inferredTotal > 0 && explicitPaid < inferredTotal - 0.01) {
+
+  if (customerMentioned && inferredTotal > 0) {
+    if (numericPaidInText) {
+      parsed.paid = paidFromText;
+      if (paidFromText < inferredTotal - 0.01 || paidFromText > inferredTotal + 0.01) {
+        parsed.intent = 'debt';
+      } else {
+        parsed.intent = 'sale';
+      }
+    } else if (paidKeywordMentioned) {
+      parsed.paid = inferredTotal;
+      parsed.intent = 'sale';
+    } else {
+      parsed.paid = 0;
+      parsed.intent = 'debt';
+    }
+  } else if (parsed.intent === 'sale' && explicitPaid !== null && inferredTotal > 0 && explicitPaid < inferredTotal - 0.01) {
     parsed.intent = 'debt';
   }
 
@@ -402,6 +425,8 @@ bot.on('text', async (ctx) => {
   if (parsed.intent === 'sale') {
     if (!parsed.items?.length) return ctx.reply('❌ No items found. Try: "sold 2 lattes"');
     const now = new Date(); const lines = []; let total = 0;
+    const saleCustomer = (parsed.customer || "").trim();
+    const saleNote = saleCustomer ? `Customer: ${saleCustomer}` : "Paid in full";
     for (const it of parsed.items) {
       const key = (it.name || "").toLowerCase().trim();
       const item = MENU[key];
@@ -409,7 +434,7 @@ bot.on('text', async (ctx) => {
       const qty = Math.max(1, parseInt(it.qty) || 1);
       try {
         for (let i = 0; i < qty; i++) {
-          await appendRow(sheets, SHEET_SALES, [formatDate(now), formatTime(now), capitalize(key), item.category, item.price, item.price, 0, "Paid in full"]);
+          await appendRow(sheets, SHEET_SALES, [formatDate(now), formatTime(now), capitalize(key), item.category, item.price, item.price, 0, saleNote]);
         }
       } catch (err) {
         return ctx.reply(`❌ Sheets error: ${err.message}`);
