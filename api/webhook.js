@@ -328,8 +328,12 @@ bot.on('text', async (ctx) => {
       const item = MENU[key];
       if (!item) { await ctx.reply(`⚠️ Item not found: "${it.name}". Skipping.`); continue; }
       const qty = Math.max(1, parseInt(it.qty) || 1);
-      for (let i = 0; i < qty; i++) {
-        await appendRow(sheets, SHEET_SALES, [formatDate(now), formatTime(now), capitalize(key), item.category, item.price, item.price, 0, "Paid in full"]);
+      try {
+        for (let i = 0; i < qty; i++) {
+          await appendRow(sheets, SHEET_SALES, [formatDate(now), formatTime(now), capitalize(key), item.category, item.price, item.price, 0, "Paid in full"]);
+        }
+      } catch (err) {
+        return ctx.reply(`❌ Sheets error: ${err.message}`);
       }
       total += item.price * qty;
       lines.push(`${qty}x ${capitalize(key)} = ${item.price * qty} AED`);
@@ -416,6 +420,24 @@ module.exports = async (req, res) => {
     res.status(200).send('OK');
   } catch (err) {
     console.error('Webhook error:', err);
+    // Try to notify the user in Telegram about the error
+    try {
+      const update = req.body;
+      const chatId = update?.message?.chat?.id;
+      if (chatId && process.env.TELEGRAM_TOKEN) {
+        const https = require('https');
+        const body  = JSON.stringify({ chat_id: chatId, text: `⚠️ Internal error: ${err.message}` });
+        const opts  = {
+          hostname: 'api.telegram.org',
+          path:     `/bot${process.env.TELEGRAM_TOKEN}/sendMessage`,
+          method:   'POST',
+          headers:  { 'Content-Type': 'application/json' },
+        };
+        const r = https.request(opts);
+        r.write(body);
+        r.end();
+      }
+    } catch (_) {}
     res.status(200).send('OK');
   }
 };
