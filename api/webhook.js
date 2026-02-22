@@ -109,7 +109,8 @@ async function parseWithGroq(userMessage) {
     `"items": [{"name": "exact menu item name", "qty": 1}], "customer": "name or null", "paid": number or null }\n\n` +
     `Rules:\n` +
     `- "sale": paid in full. "debt": paid partially or nothing. "settle": paying off a debt.\n` +
-    `- "paid" = amount handed over now (debt intent only)\n` +
+    `- "paid" = amount handed over now. If the user mentions payment, always set "paid".\n` +
+    `- "latte" and "matcha latte" are different items. If user says only "latte", choose "latte".\n` +
     `- Match item names exactly from the menu. Default qty = 1. customer = null if not mentioned.`;
 
   try {
@@ -133,6 +134,62 @@ async function parseWithGroq(userMessage) {
 const formatDate = d => d.toISOString().split('T')[0];
 const formatTime = d => d.toTimeString().split(' ')[0];
 const capitalize = s => s.replace(/\b\w/g, c => c.toUpperCase());
+const parseNumberOrNull = v => {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+function extractPaidAmount(text) {
+  if (/\b(?:paid?|pay|pays|payment)\s+(?:nothing|none|zero)\b/i.test(text) || /\bno payment\b/i.test(text)) {
+    return 0;
+  }
+
+  const patterns = [
+    /\b(?:paid?|pay|pays|payment|gave|give|handed)\s*(?:aed|dhs?|dirhams?)?\s*(\d+(?:\.\d+)?)\b/i,
+    /\b(\d+(?:\.\d+)?)\s*(?:aed|dhs?|dirhams?)?\s*(?:paid?|pay|pays)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const amount = parseNumberOrNull(match[1]);
+    if (amount !== null) return amount;
+  }
+
+  return null;
+}
+
+function inferCustomerFromText(text) {
+  const match = text.match(/\b(?:to|for)\s+([a-z][a-z0-9'_-]*)\b/i);
+  return match ? match[1] : null;
+}
+
+function inferTotalFromItems(items) {
+  if (!Array.isArray(items)) return 0;
+
+  return items.reduce((sum, it) => {
+    const key = (it?.name || "").toLowerCase().trim();
+    const item = MENU[key];
+    if (!item) return sum;
+    const qty = Math.max(1, parseInt(it.qty, 10) || 1);
+    return sum + item.price * qty;
+  }, 0);
+}
+
+function normalizeAmbiguousItems(items, userText) {
+  if (!Array.isArray(items)) return [];
+
+  const hasLatteWord = /\blatte\b/i.test(userText);
+  const hasMatchaWord = /\bmatcha\b/i.test(userText);
+
+  return items.map(it => {
+    const key = (it?.name || "").toLowerCase().trim();
+    if (key === "matcha latte" && hasLatteWord && !hasMatchaWord) {
+      return { ...it, name: "latte" };
+    }
+    return it;
+  });
+}
 
 // ─── UPDATE SUMMARY ──────────────────────────────────────────
 async function updateSummary(sheets) {
@@ -325,6 +382,21 @@ bot.on('text', async (ctx) => {
   const parsed = await parseWithGroq(text);
   if (!parsed) return ctx.reply("❌ Could not reach AI. Try:\n/help /summary /debts /menu");
 
+  parsed.items = normalizeAmbiguousItems(parsed.items, text);
+
+  const paidFromModel = parseNumberOrNull(parsed.paid);
+  const paidFromText = extractPaidAmount(text);
+  const explicitPaid = paidFromModel !== null ? paidFromModel : paidFromText;
+  if (explicitPaid !== null) parsed.paid = explicitPaid;
+
+  const hintedCustomer = inferCustomerFromText(text);
+  if (!parsed.customer && hintedCustomer) parsed.customer = hintedCustomer;
+
+  const inferredTotal = inferTotalFromItems(parsed.items);
+  if (parsed.intent === 'sale' && explicitPaid !== null && inferredTotal > 0 && explicitPaid < inferredTotal - 0.01) {
+    parsed.intent = 'debt';
+  }
+
   const sheets = getSheetsClient();
 
   if (parsed.intent === 'sale') {
@@ -362,7 +434,7 @@ bot.on('text', async (ctx) => {
       validItems.push({ key, item, qty });
     }
     if (!validItems.length) return;
-    const totalPaid = parseFloat(parsed.paid) || 0;
+    const totalPaid = parseNumberOrNull(parsed.paid) || 0;
     if (totalPaid > totalItemPrice) return ctx.reply(`⚠️ Paid (${totalPaid}) exceeds total (${totalItemPrice} AED).`);
     const lines = []; let totalOwed = 0;
     for (const { key, item, qty } of validItems) {
